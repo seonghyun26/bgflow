@@ -1,8 +1,10 @@
 import torch
+import wandb
 import numpy as np
 
 import warnings
 
+from utils.plot import *
 from bgflow.utils.types import assert_numpy
 from bgflow.distribution.sampling import DataSetSampler
 
@@ -48,6 +50,7 @@ class LossReporter:
 class KLTrainer(object):
     def __init__(
         self, bg, optim=None, train_likelihood=True, train_energy=True, custom_loss=None, test_likelihood=False,
+        configs=None, system=None
     ):
         """Trainer for minimizing the forward or reverse
 
@@ -80,6 +83,9 @@ class KLTrainer(object):
             loss_names.append("NLL(Test)")
         self.reporter = LossReporter(*loss_names)
         self.custom_loss = custom_loss
+        
+        self.configs = configs
+        self.system = system
 
     def train(
         self,
@@ -95,7 +101,8 @@ class KLTrainer(object):
         temperature=1.0,
         schedulers=(),
         clip_forces=None,
-        progress_bar=lambda x:x
+        progress_bar=lambda x:x,
+        wandb_use=False
     ):
         """
         Train the network.
@@ -193,12 +200,20 @@ class KLTrainer(object):
             self.reporter.report(*reports)
             if n_print > 0:
                 if iter % n_print == 0:
-                    self.reporter.print(*reports)
+                    # self.reporter.print(*reports)
+                    # NOTE: plot
+                    samples = self.bg.sample(self.configs["sample"]["n_samples"])
+                    plot_distribution(self.configs, self.system, samples, idx=iter)
+                    
             
             if any(torch.any(torch.isnan(p.grad)) for p in self.bg.parameters() if p.grad is not None):
                 print("found nan in grad; skipping optimization step")
             else:
                 self.optim.step()
+            
+            if wandb_use:
+                wandb_data = { item: reports[idx] for idx, item in enumerate(self.reporter._labels)}
+                wandb.log(wandb_data)            
 
 
     def losses(self, n_smooth=1):
