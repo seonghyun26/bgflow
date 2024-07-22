@@ -43,6 +43,7 @@ jobs:
         run: |
           pip install einops
           pip install nflows
+          pip install wandb
 
       - name: Install package
         shell: bash -l {0}
