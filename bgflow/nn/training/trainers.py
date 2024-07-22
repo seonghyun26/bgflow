@@ -1,10 +1,14 @@
+import os
 import torch
 import wandb
-import numpy as np
-
 import warnings
 
-from utils.plot import *
+import numpy as np
+import mdtraj as md 
+
+
+from matplotlib import pyplot as plt
+from matplotlib.colors import LogNorm
 from bgflow.utils.types import assert_numpy
 from bgflow.distribution.sampling import DataSetSampler
 
@@ -162,8 +166,14 @@ class KLTrainer(object):
 
             if self.train_energy:
                 # kl divergence to the target
-                kll = self.bg.kldiv(batchsize, temperature=temperature).mean()
-                reports.append(kll)
+                if self.configs["train"]["cv-entropy"]:
+                    kll, generated_samples = self.bg.kldiv_with_cv_entropy(batchsize, temperature=temperature)
+                    cv_entropy = self.compute_cv_entropy(generated_samples)
+                    kll = kll.mean() + self.configs["train"]["w_entropy"] * cv_entropy
+                else:
+                    kll = self.bg.kldiv(batchsize, temperature=temperature).mean()
+                reports.append(kll, cv_entropy)
+                
                 # aggregate weighted gradient
                 if w_energy > 0:
                     l = w_energy / (w_likelihood + w_energy)
@@ -204,7 +214,6 @@ class KLTrainer(object):
                     # NOTE: plot
                     samples = self.bg.sample(self.configs["sample"]["n_samples"])
                     plot_distribution(self.configs, self.system, samples, idx=iter)
-                    
             
             if any(torch.any(torch.isnan(p.grad)) for p in self.bg.parameters() if p.grad is not None):
                 print("found nan in grad; skipping optimization step")
@@ -218,3 +227,63 @@ class KLTrainer(object):
 
     def losses(self, n_smooth=1):
         return self.reporter.losses(n_smooth=n_smooth)
+    
+    def compute_cv_entropy(self, samples):
+        if not isinstance(samples, md.Trajectory):
+            trajectory = md.Trajectory(
+                xyz=samples.cpu().detach().numpy().reshape(-1, 22, 3), 
+                topology=self.system.mdtraj_topology
+            )
+            
+        phi, psi = self.system.compute_phi_psi(trajectory)
+        entropy_phi = self.compute_entropy(phi)
+        entropy_psi = self.compute_entropy(psi)
+        cv_entropy = entropy_phi + entropy_psi
+        
+        return cv_entropy
+    
+    def compute_entropy(self, data):
+        num_bins = self.configs["train"]["bin_entropy"]
+        hist, bin_edges = np.histogram(data, bins=num_bins, range=(-np.pi, np.pi), density=True)
+        
+        prob_dist = hist * np.diff(bin_edges)  # Convert counts to probabilities
+        entropy = -np.sum(prob_dist * np.log(prob_dist + np.finfo(float).eps))
+        
+        return entropy
+
+
+def plot_distribution(configs, system, samples, idx=0):
+    fig_distribution, ax = plt.subplots(figsize=(3,3))
+    
+    if configs["dataset"]["molecule"] == "Alanine Dipeptide":
+        plot_alanine_phi_psi(ax, samples, system)
+    else:
+        raise ValueError(f"Distribution plot not implemented for {configs['dataset']['molecule']}")
+    
+    image_path = f'{configs["path"]}/{configs["date"]}'
+    if not os.path.exists(image_path):
+        os.makedirs(image_path)
+    image_name = f'{image_path}/{configs["dataset"]["name"]}_{idx}.png'
+    fig_distribution.savefig(image_name)
+    print(f"Saved image to {image_name}")
+    
+    if "wandb" in configs:
+        wandb.log({"Generator samples": wandb.Image(fig_distribution)})
+    
+    plt.close()
+    
+def plot_alanine_phi_psi(ax, trajectory, system):
+    if not isinstance(trajectory, md.Trajectory):
+        trajectory = md.Trajectory(
+            xyz=trajectory.cpu().detach().numpy().reshape(-1, 22, 3), 
+            topology=system.mdtraj_topology
+        )
+    phi, psi = system.compute_phi_psi(trajectory)
+    
+    ax.hist2d(phi, psi, 100, norm=LogNorm())
+    ax.set_xlim(-np.pi, np.pi)
+    ax.set_ylim(-np.pi, np.pi)
+    ax.set_xlabel("$\phi$")
+    _ = ax.set_ylabel("$\psi$")
+    
+    return trajectory

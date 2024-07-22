@@ -1,4 +1,7 @@
 import torch
+
+import mdtraj as md
+
 from .distribution.energy import Energy
 from .distribution.sampling import Sampler
 from .utils.types import pack_tensor_in_tuple
@@ -9,6 +12,19 @@ __all__ = [
     "log_weights_given_latent"
 ]
 
+
+def compute_phi_psi(traj):
+    """Compute backbone dihedrals.
+
+    Parameters
+    ----------
+    traj : mdtraj.Trajectory
+    """
+    phi_atoms = [4, 6, 8, 14]
+    phi = md.compute_dihedrals(traj, indices=[phi_atoms])[:, 0]
+    psi_atoms = [6, 8, 14, 16]
+    psi = md.compute_dihedrals(traj, indices=[psi_atoms])[:, 0]
+    return phi, psi
 
 def unnormalized_kl_div(prior, flow, target, n_samples, temperature=1.0):
     z = prior.sample(n_samples, temperature=temperature)
@@ -145,6 +161,13 @@ class BoltzmannGenerator(Energy, Sampler):
         return unnormalized_kl_div(
             self._prior, self._flow, self._target, n_samples, temperature=temperature
         )
+    
+    def kldiv_with_cv_entropy(self, n_samples, temperature=1.0):
+        z = self._prior.sample(n_samples, temperature=temperature)
+        z = pack_tensor_in_tuple(z)
+        *x, dlogp = self._flow(*z, temperature=temperature)
+        
+        return self._target.energy(*x, temperature=temperature) - dlogp, x[0]
 
     def log_weights(self, *x, temperature=1.0, normalize=True):
         return log_weights(
