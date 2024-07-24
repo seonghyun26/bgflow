@@ -1,4 +1,5 @@
 import os
+import math
 import torch
 import wandb
 import warnings
@@ -31,12 +32,14 @@ class LossReporter:
         for i in range(self._n_reported):
             self._raw[i].append(assert_numpy(losses[i]))
 
-    def print(self, *losses):
+    def print(self, progress_bar, *losses):
         iter = len(self._raw[0])
         report_str = "{0}\t".format(iter)
         for i in range(self._n_reported):
             report_str += "{0}: {1:.4f}\t".format(self._labels[i], self._raw[i][-1])
         print(report_str)
+        # progress_bar.write(report_str)
+        # progress_bar.update(1)
 
     def losses(self, n_smooth=1):
         x = np.arange(n_smooth, len(self._raw[0]) + 1)
@@ -53,7 +56,13 @@ class LossReporter:
 
 class KLTrainer(object):
     def __init__(
-        self, bg, optim=None, train_likelihood=True, train_energy=True, custom_loss=None, test_likelihood=False,
+        self,
+        bg,
+        optim=None,
+        train_likelihood=True,
+        train_energy=True,
+        custom_loss=None,
+        test_likelihood=False,
         configs=None, system=None
     ):
         """Trainer for minimizing the forward or reverse
@@ -71,6 +80,10 @@ class KLTrainer(object):
             optim = torch.optim.Adam(bg.parameters(), lr=5e-3)
         self.optim = optim
 
+        self.configs = configs
+        self.system = system
+        
+        
         loss_names = []
         self.train_likelihood = train_likelihood
         self.w_likelihood = 0.0
@@ -83,13 +96,15 @@ class KLTrainer(object):
         if train_likelihood:
             loss_names.append("NLL")
             self.w_likelihood = 1.0
+        if self.configs["train"]["cv-entropy"]:
+            loss_names.append("CV-Entropy")
+            self.w_entropy = self.configs["train"]["w_entropy"]
         if test_likelihood: 
             loss_names.append("NLL(Test)")
         self.reporter = LossReporter(*loss_names)
         self.custom_loss = custom_loss
         
-        self.configs = configs
-        self.system = system
+        
 
     def train(
         self,
@@ -168,11 +183,15 @@ class KLTrainer(object):
                 # kl divergence to the target
                 if self.configs["train"]["cv-entropy"]:
                     kll, generated_samples = self.bg.kldiv_with_cv_entropy(batchsize, temperature=temperature)
+                    kll = kll.mean()
+                    reports.append(kll) 
+                    scaling = math.log10(kll)
                     cv_entropy = self.compute_cv_entropy(generated_samples)
-                    kll = kll.mean() + self.configs["train"]["w_entropy"] * cv_entropy
+                    cv_entropy = (10 ** float(int(scaling))) * torch.tensor(cv_entropy).to(kll.device)
+                    reports.append(cv_entropy)
                 else:
                     kll = self.bg.kldiv(batchsize, temperature=temperature).mean()
-                reports.append(kll, cv_entropy)
+                    reports.append(kll) 
                 
                 # aggregate weighted gradient
                 if w_energy > 0:
@@ -210,10 +229,10 @@ class KLTrainer(object):
             self.reporter.report(*reports)
             if n_print > 0:
                 if iter % n_print == 0:
-                    # self.reporter.print(*reports)
+                    self.reporter.print(progress_bar, *reports)
                     # NOTE: plot
                     samples = self.bg.sample(self.configs["sample"]["n_samples"])
-                    plot_distribution(self.configs, self.system, samples, idx=iter)
+                    plot_distribution(self.configs, self.system, samples, progress_bar, idx=iter)
             
             if any(torch.any(torch.isnan(p.grad)) for p in self.bg.parameters() if p.grad is not None):
                 print("found nan in grad; skipping optimization step")
@@ -252,7 +271,7 @@ class KLTrainer(object):
         return entropy
 
 
-def plot_distribution(configs, system, samples, idx=0):
+def plot_distribution(configs, system, samples, progress_bar, idx=0):
     fig_distribution, ax = plt.subplots(figsize=(3,3))
     
     if configs["dataset"]["molecule"] == "Alanine Dipeptide":
@@ -266,6 +285,8 @@ def plot_distribution(configs, system, samples, idx=0):
     image_name = f'{image_path}/{configs["dataset"]["name"]}_{idx}.png'
     fig_distribution.savefig(image_name)
     print(f"Saved image to {image_name}")
+    # progress_bar.write(f"Saved image to {image_name}")
+    # progress_bar.update(1)
     
     if "wandb" in configs:
         wandb.log({"Generator samples": wandb.Image(fig_distribution)})
